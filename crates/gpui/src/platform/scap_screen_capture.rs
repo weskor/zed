@@ -29,7 +29,7 @@ pub fn scap_screen_sources(
 /// On Wayland (Linux), prompts the user to select a target, and populates the receiver with a
 /// single screen capture source for their selection.
 #[allow(dead_code)]
-pub(crate) fn start_scap_default_target_source(
+pub fn start_scap_default_target_source(
     foreground_executor: &ForegroundExecutor,
 ) -> oneshot::Receiver<Result<Vec<Rc<dyn ScreenCaptureSource>>>> {
     let (sources_tx, sources_rx) = oneshot::channel();
