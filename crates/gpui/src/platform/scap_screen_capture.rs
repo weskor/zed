@@ -88,6 +88,15 @@ impl ScreenCaptureSource for ScapCaptureSource {
         foreground_executor: &ForegroundExecutor,
         frame_callback: Box<dyn Fn(ScreenCaptureFrame) + Send>,
     ) -> oneshot::Receiver<Result<Box<dyn ScreenCaptureStream>>> {
+        self.stream_with_error_callback(foreground_executor, frame_callback, Box::new(drop))
+    }
+
+    fn stream_with_error_callback(
+        &self,
+        foreground_executor: &ForegroundExecutor,
+        frame_callback: Box<dyn Fn(ScreenCaptureFrame) + Send>,
+        error_callback: Box<dyn FnOnce(anyhow::Error) + Send>,
+    ) -> oneshot::Receiver<Result<Box<dyn ScreenCaptureStream>>> {
         let (stream_tx, stream_rx) = oneshot::channel();
         let target = self.target.clone();
 
@@ -96,7 +105,13 @@ impl ScreenCaptureSource for ScapCaptureSource {
             match new_scap_capturer(Some(scap::Target::Display(target.clone()))) {
                 Ok(mut capturer) => {
                     capturer.start_capture();
-                    run_capture(capturer, target.clone(), frame_callback, stream_tx);
+                    run_capture(
+                        capturer,
+                        target.clone(),
+                        frame_callback,
+                        error_callback,
+                        stream_tx,
+                    );
                 }
                 Err(e) => {
                     stream_tx.send(Err(e)).ok();
@@ -115,6 +130,8 @@ struct ScapDefaultTargetCaptureSource {
         oneshot::Sender<Result<ScapStream>>,
         // Callback for frames.
         Box<dyn Fn(ScreenCaptureFrame) + Send>,
+        // Callback for an unexpected capture failure.
+        Box<dyn FnOnce(anyhow::Error) + Send>,
     )>,
     target: scap::Display,
     size: Size<DevicePixels>,
@@ -150,10 +167,10 @@ fn start_default_target_screen_capture(
                         target: display.clone(),
                     }]))
                     .ok();
-                let Ok((stream_tx, frame_callback)) = stream_rx.recv() else {
+                let Ok((stream_tx, frame_callback, error_callback)) = stream_rx.recv() else {
                     return;
                 };
-                run_capture(capturer, display, frame_callback, stream_tx);
+                run_capture(capturer, display, frame_callback, error_callback, stream_tx);
             }
             Err(e) => {
                 sources_tx.send(Err(e)).ok();
@@ -182,11 +199,23 @@ impl ScreenCaptureSource for ScapDefaultTargetCaptureSource {
         foreground_executor: &ForegroundExecutor,
         frame_callback: Box<dyn Fn(ScreenCaptureFrame) + Send>,
     ) -> oneshot::Receiver<Result<Box<dyn ScreenCaptureStream>>> {
+        self.stream_with_error_callback(foreground_executor, frame_callback, Box::new(drop))
+    }
+
+    fn stream_with_error_callback(
+        &self,
+        foreground_executor: &ForegroundExecutor,
+        frame_callback: Box<dyn Fn(ScreenCaptureFrame) + Send>,
+        error_callback: Box<dyn FnOnce(anyhow::Error) + Send>,
+    ) -> oneshot::Receiver<Result<Box<dyn ScreenCaptureStream>>> {
         let (tx, rx) = oneshot::channel();
-        match self.stream_call_tx.try_send((tx, frame_callback)) {
+        match self
+            .stream_call_tx
+            .try_send((tx, frame_callback, error_callback))
+        {
             Ok(()) => {}
-            Err(std::sync::mpsc::TrySendError::Full((tx, _)))
-            | Err(std::sync::mpsc::TrySendError::Disconnected((tx, _))) => {
+            Err(std::sync::mpsc::TrySendError::Full((tx, _, _)))
+            | Err(std::sync::mpsc::TrySendError::Disconnected((tx, _, _))) => {
                 // Note: support could be added for being called again after end of prior stream.
                 tx.send(Err(anyhow!(
                     "Can't call ScapDefaultTargetCaptureSource::stream multiple times."
@@ -216,6 +245,7 @@ fn run_capture(
     mut capturer: scap::capturer::Capturer,
     display: scap::Display,
     frame_callback: Box<dyn Fn(ScreenCaptureFrame) + Send>,
+    error_callback: Box<dyn FnOnce(anyhow::Error) + Send>,
     stream_tx: oneshot::Sender<Result<ScapStream>>,
 ) {
     let cancel_stream = Arc::new(AtomicBool::new(false));
@@ -231,11 +261,17 @@ fn run_capture(
     if stream_send_result.is_err() {
         return;
     }
+    let mut error_callback = Some(error_callback);
     while !cancel_stream.load(std::sync::atomic::Ordering::SeqCst) {
         match capturer.get_next_frame() {
             Ok(frame) => frame_callback(ScreenCaptureFrame(frame)),
             Err(err) => {
                 log::error!("Halting screen capture due to error: {err}");
+                if !cancel_stream.load(std::sync::atomic::Ordering::SeqCst)
+                    && let Some(error_callback) = error_callback.take()
+                {
+                    error_callback(err);
+                }
                 break;
             }
         }

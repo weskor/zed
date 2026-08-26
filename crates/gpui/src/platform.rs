@@ -434,6 +434,19 @@ pub trait ScreenCaptureSource {
         foreground_executor: &ForegroundExecutor,
         frame_callback: Box<dyn Fn(ScreenCaptureFrame) + Send>,
     ) -> oneshot::Receiver<Result<Box<dyn ScreenCaptureStream>>>;
+
+    /// Start capture and report an error if the source ends unexpectedly.
+    ///
+    /// Platforms without source-ended notifications fall back to [`Self::stream`].
+    fn stream_with_error_callback(
+        &self,
+        foreground_executor: &ForegroundExecutor,
+        frame_callback: Box<dyn Fn(ScreenCaptureFrame) + Send>,
+        error_callback: Box<dyn FnOnce(anyhow::Error) + Send>,
+    ) -> oneshot::Receiver<Result<Box<dyn ScreenCaptureStream>>> {
+        drop(error_callback);
+        self.stream(foreground_executor, frame_callback)
+    }
 }
 
 /// A video stream captured from a screen.
