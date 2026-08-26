@@ -5,7 +5,6 @@ use crate::{
 };
 use anyhow::{Context as _, Result, anyhow};
 use futures::channel::oneshot;
-use scap::Target;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{self, AtomicBool};
@@ -107,7 +106,7 @@ impl ScreenCaptureSource for ScapCaptureSource {
                     capturer.start_capture();
                     run_capture(
                         capturer,
-                        target.clone(),
+                        display_metadata(&target),
                         frame_callback,
                         error_callback,
                         stream_tx,
@@ -133,7 +132,6 @@ struct ScapDefaultTargetCaptureSource {
         // Callback for an unexpected capture failure.
         Box<dyn FnOnce(anyhow::Error) + Send>,
     )>,
-    target: scap::Display,
     size: Size<DevicePixels>,
 }
 
@@ -150,35 +148,36 @@ fn start_default_target_screen_capture(
                 .get_next_frame()
                 .context("Failed to get first frame of screenshare to get the size.")?;
             let size = frame_size(&first_frame);
-            let target = capturer
-                .target()
-                .context("Unable to determine the target display.")?;
-            let target = target.clone();
-            Ok((capturer, size, target))
+            Ok((capturer, size))
         });
 
         match start_result {
-            Ok((capturer, size, Target::Display(display))) => {
+            Ok((capturer, size)) => {
                 let (stream_call_tx, stream_rx) = std::sync::mpsc::sync_channel(1);
                 sources_tx
                     .send(Ok(vec![ScapDefaultTargetCaptureSource {
                         stream_call_tx,
                         size,
-                        target: display.clone(),
                     }]))
                     .ok();
                 let Ok((stream_tx, frame_callback, error_callback)) = stream_rx.recv() else {
                     return;
                 };
-                run_capture(capturer, display, frame_callback, error_callback, stream_tx);
+                run_capture(
+                    capturer,
+                    SourceMetadata {
+                        resolution: size,
+                        label: None,
+                        is_main: None,
+                        id: 0,
+                    },
+                    frame_callback,
+                    error_callback,
+                    stream_tx,
+                );
             }
             Err(e) => {
                 sources_tx.send(Err(e)).ok();
-            }
-            _ => {
-                sources_tx
-                    .send(Err(anyhow!("The screen capture source is not a display")))
-                    .ok();
             }
         }
     });
@@ -190,7 +189,7 @@ impl ScreenCaptureSource for ScapDefaultTargetCaptureSource {
             resolution: self.size,
             label: None,
             is_main: None,
-            id: self.target.id as u64,
+            id: 0,
         })
     }
 
@@ -241,22 +240,29 @@ fn new_scap_capturer(target: Option<scap::Target>) -> Result<scap::capturer::Cap
     })
 }
 
+fn display_metadata(display: &scap::Display) -> SourceMetadata {
+    SourceMetadata {
+        resolution: Size {
+            width: DevicePixels(display.width as i32),
+            height: DevicePixels(display.height as i32),
+        },
+        label: Some(display.title.clone().into()),
+        is_main: None,
+        id: display.id as u64,
+    }
+}
+
 fn run_capture(
     mut capturer: scap::capturer::Capturer,
-    display: scap::Display,
+    metadata: SourceMetadata,
     frame_callback: Box<dyn Fn(ScreenCaptureFrame) + Send>,
     error_callback: Box<dyn FnOnce(anyhow::Error) + Send>,
     stream_tx: oneshot::Sender<Result<ScapStream>>,
 ) {
     let cancel_stream = Arc::new(AtomicBool::new(false));
-    let size = Size {
-        width: DevicePixels(display.width as i32),
-        height: DevicePixels(display.height as i32),
-    };
     let stream_send_result = stream_tx.send(Ok(ScapStream {
         cancel_stream: cancel_stream.clone(),
-        display,
-        size,
+        metadata,
     }));
     if stream_send_result.is_err() {
         return;
@@ -281,18 +287,12 @@ fn run_capture(
 
 struct ScapStream {
     cancel_stream: Arc<AtomicBool>,
-    display: scap::Display,
-    size: Size<DevicePixels>,
+    metadata: SourceMetadata,
 }
 
 impl ScreenCaptureStream for ScapStream {
     fn metadata(&self) -> Result<SourceMetadata> {
-        Ok(SourceMetadata {
-            resolution: self.size,
-            label: Some(self.display.title.clone().into()),
-            is_main: None,
-            id: self.display.id as u64,
-        })
+        Ok(self.metadata.clone())
     }
 }
 
