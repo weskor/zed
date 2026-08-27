@@ -18,8 +18,13 @@ fn embed_resource() {
     let rc_file = manifest_dir.join("resources/windows/gpui.rc");
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rerun-if-changed={}", rc_file.display());
-    std::env::set_current_dir(manifest_dir).unwrap();
-    embed_resource::compile(&rc_file, embed_resource::NONE)
+    let resource_path = manifest.to_string_lossy().replace('\\', "\\\\");
+    let resource = std::fs::read_to_string(rc_file)
+        .unwrap()
+        .replace("resources/windows/gpui.manifest.xml", &resource_path);
+    let generated_rc = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("gpui.rc");
+    std::fs::write(&generated_rc, resource).unwrap();
+    embed_resource::compile(&generated_rc, embed_resource::NONE)
         .manifest_required()
         .unwrap();
 }
