@@ -1,15 +1,20 @@
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
 
 fn main() {
-    #[cfg(target_os = "windows")]
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS");
+    println!("cargo:rerun-if-env-changed=PROFILE");
+    println!("cargo:rerun-if-env-changed=GPUI_FXC_PATH");
+    println!("cargo:rerun-if-env-changed=PATH");
+
+    // Build scripts run on the host and can have different debug assertions from the target.
+    // PROFILE also keeps release builds with debug information on the precompiled shader path.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("PROFILE").as_deref() == Ok("release")
     {
-        // Compile HLSL shaders
-        #[cfg(not(debug_assertions))]
-        compile_shaders();
+        shader_compilation::compile_shaders();
     }
 }
 
-#[cfg(all(target_os = "windows", not(debug_assertions)))]
 mod shader_compilation {
     use std::{
         fs,
@@ -58,6 +63,7 @@ mod shader_compilation {
         {
             let shader_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
                 .join("src/color_text_raster.hlsl");
+            println!("cargo:rerun-if-changed={}", shader_path.display());
             compile_shader_for_module(
                 "emoji_rasterization",
                 &out_dir,
@@ -68,6 +74,7 @@ mod shader_compilation {
         }
     }
 
+    #[cfg(target_os = "windows")]
     /// Locate `binary` in the newest installed Windows SDK.
     pub fn find_latest_windows_sdk_binary(
         binary: &str,
@@ -111,31 +118,38 @@ mod shader_compilation {
         Ok(None)
     }
 
-    /// You can set the `GPUI_FXC_PATH` environment variable to specify the path to the fxc.exe compiler.
+    /// Use `GPUI_FXC_PATH` for an FXC executable or cross-compilation wrapper on any host.
     fn find_fxc_compiler() -> String {
-        // Check environment variable
-        if let Ok(path) = std::env::var("GPUI_FXC_PATH")
-            && Path::new(&path).exists()
-        {
+        if let Ok(path) = std::env::var("GPUI_FXC_PATH") {
+            assert!(
+                !path.is_empty(),
+                "GPUI_FXC_PATH must name an FXC executable or executable wrapper"
+            );
             return path;
         }
 
-        // Try to find in PATH
-        // NOTE: This has to be `where.exe` on Windows, not `where`, it must be ended with `.exe`
-        if let Ok(output) = std::process::Command::new("where.exe")
-            .arg("fxc.exe")
-            .output()
-            && output.status.success()
+        #[cfg(target_os = "windows")]
         {
-            let path = String::from_utf8_lossy(&output.stdout);
-            return path.trim().to_string();
+            // NOTE: This must be `where.exe` on Windows, not `where`.
+            if let Ok(output) = Command::new("where.exe").arg("fxc.exe").output()
+                && output.status.success()
+            {
+                let paths = String::from_utf8_lossy(&output.stdout);
+                if let Some(path) = paths.lines().map(str::trim).find(|path| !path.is_empty()) {
+                    return path.to_string();
+                }
+            }
+
+            if let Ok(Some(path)) = find_latest_windows_sdk_binary("fxc.exe") {
+                return path.to_string_lossy().into_owned();
+            }
         }
 
-        if let Ok(Some(path)) = find_latest_windows_sdk_binary("fxc.exe") {
-            return path.to_string_lossy().into_owned();
-        }
-
-        panic!("Failed to find fxc.exe");
+        panic!(
+            "Failed to find FXC for Windows release shaders. Install the Windows SDK on Windows, \
+             or set GPUI_FXC_PATH to an executable FXC wrapper on this host that accepts \
+             /T, /E, /Fh, /Vn, /O3 and host-native source/output paths."
+        );
     }
 
     fn compile_shader_for_module(
@@ -237,6 +251,3 @@ mod shader_compilation {
             .expect("Failed to write Rust binding file");
     }
 }
-
-#[cfg(all(target_os = "windows", not(debug_assertions)))]
-use shader_compilation::compile_shaders;
